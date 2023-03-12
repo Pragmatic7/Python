@@ -22,7 +22,7 @@ img_width = 224
 num_classes = 2
 
 
-data_dir = 'C:/Users/leocy/Downloads/Deep learning/FocusDL/Data/Dataset/Training'
+data_dir = 'C:/Users/Downloads/Deep learning/FocusDL/Data/Dataset/Training'
 
 data_dir = pathlib.Path(data_dir)
 print(data_dir)
@@ -63,7 +63,7 @@ train_ds = train_ds.cache().prefetch(buffer_size=AUTOTUNE)
 val_ds = val_ds.cache().prefetch(buffer_size=AUTOTUNE)
 
 
-# ### Train a model Inception v3
+# ### Train a model ResNet50
 base_model = ResNet50(input_shape=(224, 224,3), include_top=False, weights="imagenet")
 
 for layer in base_model.layers:
