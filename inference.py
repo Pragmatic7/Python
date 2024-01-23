@@ -1,90 +1,118 @@
-import os
-import fire
-import torch
-import pandas as pd
-from tqdm import tqdm
+import os, pickle, json, time, fire, logging, transformers
 
-from eval_utils import load_model, generate_text
+logging.basicConfig(
+    format="%(asctime)s %(levelname)-8s %(message)s",
+    level=logging.INFO,
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger("llama2_test")
+
+transformers.logging.set_verbosity_info()
+
+logger.info(os.getcwd())
+os.chdir("/home/ubuntu/llm_testing/")
+logger.info(os.getcwd())
+
+
+def prepare_prompts(base_prompt_path: str, prompts_path: str):
+    """Function that adds base prompts (for Chain of thought or few shot prompting) to each prompt for inference
+
+    Params:
+        base_prompt_path (str): path to a pickle file containing the base prompt
+        prompts_path (str): path to a pickle file containing the prompts to run on the llm
+
+    Returns:
+        prompts (list str): list of prompts to run with the base prompts prepended to each
+        pmt_raw (list str): list of prompts as is
+        answers (list tuple): list of expected answer tuple (option, answer)
+    """
+
+    # Data prep
+    with open(base_prompt_path, "rb") as f:
+        base_prompt = pickle.load(f)
+    with open(prompts_path, "r") as f:
+        new_prompts = json.load(f)
+
+    prompts = []
+    pmt_raw = []
+    answers = []
+
+    # Prepare prompts
+    for pmt in new_prompts:
+        pmt_fmt = f"""{base_prompt}
+        
+    {pmt['question']}
+    Answer: """
+
+        prompts.append(pmt_fmt)
+        pmt_raw.append(pmt)
+        answers.append((pmt["answer_letter"], pmt["answer"]))
+
+    return prompts, pmt_raw, answers
+
+
+def load_llm_pipeline(model_path: str):
+    """Function to load the LLaMa model and create pipeline
+
+    Params:
+        model_path (str): path to the model storage directory
+
+    Returns:
+        pipeline (transformers.Pipeline): Pipeline
+        tokenizer (transformers.LlamaTokenizer): LlamaTokennizer
+    """
+    logger.info("Loading Llama2 70B Chat")
+    tokenizer = transformers.LlamaTokenizer.from_pretrained(model_path, legacy=False)
+    pipeline = transformers.pipeline(
+        "text-generation",
+        model=model_path,
+        device_map="auto",
+    )
+    return pipeline, tokenizer
+
 
 def main(
-    model_name,
-    output_path: str,
-    peft_model: str = None,
-    quantization: bool = False,
-    max_new_tokens=10,  # The maximum numbers of tokens to generate
-    prompt_file: str = None,  # CSV file with prompts in the user_prompt column
-    seed: int = 42,  # seed value for reproducibility
-    do_sample: bool = True,  # Whether or not to use sampling ; use greedy decoding otherwise.
-    min_length: int = None,  # The minimum length of the sequence to be generated, input prompt + min_new_tokens
-    use_cache: bool = False,  # [optional] Whether or not the model should use the past last key/values attentions Whether or not the model should use the past last key/values attentions (if applicable to the model) to speed up decoding.
-    top_p: float = 1.0,  # [optional] If set to float < 1, only the smallest set of most probable tokens with probabilities that add up to top_p or higher are kept for generation.
-    temperature: float = 1.0,  # [optional] The value used to modulate the next token probabilities.
-    top_k: int = 10,  # [optional] The number of highest probability vocabulary tokens to keep for top-k-filtering.
-    repetition_penalty: float = 1.0,  # The parameter for repetition penalty. 1.0 means no penalty.
-    length_penalty: int = 1,  # [optional] Exponential penalty to the length that is used with beam-based generation.
-    # enable_azure_content_safety: bool = False,  # Enable safety check with Azure content safety api
-    # enable_sensitive_topics: bool = False,  # Enable check for sensitive topics using AuditNLG APIs
-    # enable_salesforce_content_safety: bool = True,  # Enable safety check with Salesforce safety flan t5
-    max_padding_length: int = None,  # the max padding length to be used with tokenizer padding the prompts.
-    use_fast_kernels: bool = False,  # Enable using SDPA from PyTroch Accelerated Transformers, make use Flash Attention and Xformer memory-efficient kernels
-    **kwargs,
+    model_path: str = "../llama-2-70b-chat-hf",
+    output_dir: str = "results/",
+    base_prompt_path: str = "../cot_base.pkl",
+    prompts_path: str = "../training_prompts.json",
 ):
-    print(quantization)
-    if not os.path.exists(output_path):
-        os.makedirs(output_path)
-    # Set the seeds for reproducibility
-    torch.cuda.manual_seed(seed)
-    torch.manual_seed(seed)
+    """Function to run text generation on prompts"""
+    logger.info("Loading base prompt and prompts to run")
 
-    model, tokenizer = load_model(
-        model_name, peft_model, quantization, use_fast_kernels
+    prompts, pmt_raw, answers = prepare_prompts(base_prompt_path, prompts_path)
+
+    start_time = time.time()
+    pipeline, tokenizer = load_llm_pipeline(model_path)
+    model_prep_time = time.time()
+
+    logger.info("Finished model loading")
+    logger.info("Model prep time: {}".format(model_prep_time - start_time))
+
+    sequences = pipeline(
+        prompts,
+        do_sample=True,
+        top_k=10,
+        num_return_sequences=1,
+        eos_token_id=tokenizer.eos_token_id,
+        max_new_tokens=10,
     )
 
-    # Load in prompts to run from a csv file
-    prompts_df = pd.read_csv(prompt_file)
+    inf_time = time.time()
+    logger.info("Finished running inference")
+    logger.info("Total inference time: {}".format(inf_time - model_prep_time))
 
-    for i in range(5):
-        model_outputs = list()
-        for _, row in tqdm(prompts_df.iterrows(), total=len(prompts_df)):
-            user_prompt = row["user_prompt"]
-            # question = row["question"]
-            correct_answer = row["correct_answer"]
-            try:
-                output_text = generate_text(
-                    model,
-                    tokenizer,
-                    user_prompt,
-                    max_padding_length,
-                    max_new_tokens,
-                    do_sample,
-                    top_p,
-                    temperature,
-                    min_length,
-                    use_cache,
-                    top_k,
-                    repetition_penalty,
-                    length_penalty,
-                    **kwargs,
-                )
-                model_response = output_text.split(user_prompt)[-1].strip()
-            except:
-                print("Error during generation")
-                model_response = "No Output"
+    time_analysis = {"model_prep_time": model_prep_time, "inf_time": inf_time}
 
-            # print(model_response, correct_answer)
-            model_outputs.append(
-                {
-                    "user_prompt": user_prompt,
-                    f"model_response_{i}": model_response,
-                }
-            )
-
-        model_outputs = pd.DataFrame(model_outputs)
-        model_outputs.to_csv(os.path.join(output_path, f"results_v{i}.csv"))
-
-        prompts_df = prompts_df.merge(model_outputs, on="user_prompt")
-
-    prompts_df.to_csv(os.path.join(output_path, f"combined_results.csv"))
+    # Saving processed prompts and outputs
+    with open(os.path.join(output_dir, "pmt_raw.pkl"), "wb") as f:
+        pickle.dump(pmt_raw, f)
+    with open(os.path.join(output_dir, "answers.pkl"), "wb") as f:
+        pickle.dump(answers, f)
+    with open(os.path.join(output_dir, "outputs.pkl"), "wb") as f:
+        pickle.dump(sequences, f)
+    with open(os.path.join(output_dir, "time_analysis.pkl"), "wb") as f:
+        pickle.dump(time_analysis, f)
 
 
 if __name__ == "__main__":
